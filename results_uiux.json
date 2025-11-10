@@ -1,0 +1,17 @@
+{
+  "cache_delay": {
+    "follow_call_latency_ms": 16.091346740722656,
+    "status_after_follow": true
+  },
+  "concurrent_toggle": {
+    "final_db_state": true,
+    "final_cache_state": false
+  },
+  "cross_tenant": {
+    "tenant1_status": true,
+    "tenant2_status": false
+  },
+  "soft_delete": {
+    "status": false
+  }
+}
