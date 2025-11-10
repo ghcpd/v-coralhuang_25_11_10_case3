@@ -1,0 +1,175 @@
+{
+  "meta": {
+    "version": "1.0",
+    "scenario": "UI/UX follow-state desynchronization between frontend optimistic update, Flask API, PostgreSQL followers table, and Redis cache",
+    "generated_at": "2025-11-10T12:00:00Z",
+    "purpose": "Provide faulty inputs and reproduction evidence for an AI agent to diagnose and fix inconsistent follow/unfollow UI states."
+  },
+  "environment": {
+    "backend": "Flask + SQLAlchemy",
+    "database": "PostgreSQL 14",
+    "cache": "Redis 6 (shared, no tenant prefix)",
+    "frontend": "React + Axios (optimistic UI update)",
+    "notes": [
+      "followers table does NOT have tenant_id column",
+      "Redis keys do NOT include tenant_id",
+      "follow_status API reads Redis first, does NOT reconcile with DB when cache is stale",
+      "UI flips button state BEFORE HTTP 200 is received"
+    ]
+  },
+  "faulty_models": {
+    "followers_table": {
+      "ddl": "CREATE TABLE followers (follower_id INTEGER NOT NULL, followed_id INTEGER NOT NULL);",
+      "problems": [
+        "no tenant_id column",
+        "no composite unique constraint",
+        "cannot enforce same-tenant follow",
+        "cannot invalidate cache per tenant"
+      ]
+    },
+    "user_model_snippet": "class User(db.Model):\n    id = db.Column(db.Integer, primary_key=True)\n    tenant_id = db.Column(db.Integer, nullable=False)\n    # ... other fields ...",
+    "api_follow_status": "def follow_status(follower_id, followed_id):\n    cached = redis.get(f\"follow_status:{follower_id}:{followed_id}\")\n    if cached is not None:\n        return {\"following\": bool(int(cached))}\n    # BUG: does not check DB on cache miss or drift"
+  },
+  "test_cases": [
+    {
+      "id": "ui_desync_cache_delay",
+      "description": "UI shows 'Following' immediately, but refresh reads stale Redis which still says not-following.",
+      "input": {
+        "tenant_id": 1,
+        "follower_id": 101,
+        "followed_id": 202,
+        "client_action": "click_follow_button",
+        "redis_artificial_delay_ms": 2000
+      },
+      "actual_events": [
+        "frontend -> optimistic state: FOLLOWING",
+        "backend -> INSERT INTO followers (101,202)",
+        "redis -> follow_status:101:202 still 0",
+        "frontend -> page reload -> GET /follow_status/202 -> returns {\"following\": false}"
+      ],
+      "expected_behavior": {
+        "ui_state": "FOLLOWING",
+        "api_response": {
+          "following": true
+        },
+        "latency_budget_ms": 200
+      },
+      "observed_bug": "After reload UI returns to 'Follow' even though DB already has row.",
+      "category": "UI/UX bug"
+    },
+    {
+      "id": "concurrent_toggle_race",
+      "description": "Rapid follow/unfollow from the same user leads to nondeterministic final UI state because cache writes are not atomic.",
+      "input": {
+        "tenant_id": 1,
+        "follower_id": 303,
+        "followed_id": 404,
+        "actions": [
+          "follow",
+          "unfollow",
+          "follow"
+        ],
+        "action_interval_ms": 150
+      },
+      "actual_events": [
+        "DB final state: follower row EXISTS",
+        "Redis final key: follow_status:303:404 -> 0",
+        "UI after reload: shows 'Follow'"
+      ],
+      "expected_behavior": {
+        "final_db_state": "following",
+        "final_cache_state": "following",
+        "final_ui_state": "Following"
+      },
+      "observed_bug": "DB and Redis diverge; UI renders the wrong one.",
+      "category": "UI/UX bug"
+    },
+    {
+      "id": "cross_tenant_visibility",
+      "description": "Because Redis keys are missing tenant scoping, tenant 2 reads tenant 1's follow state.",
+      "input": {
+        "tenant_id_writer": 1,
+        "tenant_id_reader": 2,
+        "follower_id": 5001,
+        "followed_id": 5002
+      },
+      "actual_events": [
+        "tenant 1 user 5001 follows 5002 -> Redis set follow_status:5001:5002=1",
+        "tenant 2 user with same numeric ids queries /follow_status -> returns 1",
+        "tenant 2 UI shows 'Following' even though no relationship in tenant 2 DB"
+      ],
+      "expected_behavior": {
+        "tenant_isolation": true,
+        "reader_should_see": "not-following"
+      },
+      "observed_bug": "shared Redis keyspace leaks follow state across tenants.",
+      "category": "Functional bug"
+    },
+    {
+      "id": "api_returns_stale_after_soft_delete",
+      "description": "Soft-deleted follower rows are still reported as active in Redis.",
+      "input": {
+        "tenant_id": 3,
+        "follower_id": 700,
+        "followed_id": 701,
+        "operation": "soft_delete"
+      },
+      "actual_events": [
+        "DB: followers row marked deleted = true",
+        "Redis: key follow_status:700:701 still = 1",
+        "UI: shows 'Following'"
+      ],
+      "expected_behavior": {
+        "ui_state": "Follow",
+        "api_response": {
+          "following": false
+        }
+      },
+      "observed_bug": "UI shows following for a soft-deleted relationship because cache was never invalidated.",
+      "category": "UI/UX bug"
+    },
+    {
+      "id": "delayed_backend_confirmation",
+      "description": "Frontend commits to 'Following' without waiting for HTTP 200; backend actually failed (IntegrityError) but UI never rolled back.",
+      "input": {
+        "tenant_id": 4,
+        "follower_id": 800,
+        "followed_id": 801,
+        "client_action": "click_follow_button",
+        "backend_failure": "IntegrityError"
+      },
+      "actual_events": [
+        "frontend: state -> FOLLOWING",
+        "backend: 500 INTERNAL SERVER ERROR (IntegrityError: duplicate key)",
+        "UI: stays at FOLLOWING",
+        "page reload: /follow_status -> {\"following\": false}"
+      ],
+      "expected_behavior": {
+        "ui_state_after_failure": "Follow",
+        "error_message": "Follow failed, please retry"
+      },
+      "observed_bug": "UI permanently shows 'Following' even though backend failed.",
+      "category": "UI/UX bug"
+    }
+  ],
+  "logs": {
+    "flask_app.log": [
+      "INFO 2025-11-10T11:58:01Z POST /follow 200 user_id=101 target_id=202",
+      "INFO 2025-11-10T11:58:01Z SQL INSERT INTO followers (follower_id, followed_id) VALUES (101,202);",
+      "WARN 2025-11-10T11:58:01Z redis GET follow_status:101:202 -> 0 (stale)",
+      "INFO 2025-11-10T11:58:02Z GET /follow_status/202 -> returning cached=false"
+    ],
+    "redis.log": [
+      "SET follow_status:101:202 1 EX 60",
+      "GET follow_status:101:202 -> 0 (replica lag)",
+      "GET follow_status:5001:5002 -> 1 (no tenant separation)"
+    ]
+  },
+  "expected_agent_actions": [
+    "add tenant_id to followers table and to Redis key structure",
+    "modify /follow_status to reconcile Redis and DB when mismatch detected",
+    "change frontend follow button to wait for HTTP 200 before committing to 'Following'",
+    "add tests to simulate cache delay and concurrent toggle",
+    "produce output.json summarizing root causes, fixes, and test results"
+  ]
+}
