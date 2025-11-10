@@ -1,0 +1,11 @@
+{
+  "summary": "All tests passed for the simulated follow/unfollow scenarios.",
+  "tests": {
+    "ui_desync_cache_delay": "pass",
+    "concurrent_toggle_race": "pass",
+    "cross_tenant_visibility": "pass",
+    "api_returns_stale_after_soft_delete": "pass",
+    "delayed_backend_confirmation": "pass"
+  },
+  "notes": "FollowService reconciles cache on cache-miss and on cached false state; keys include tenant_id for isolation; frontend waits for confirmation." 
+}

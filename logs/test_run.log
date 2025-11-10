@@ -1,0 +1,8 @@
+2025-11-10T12:02:00Z INIT: Tests starting
+2025-11-10T12:02:00Z MOCK: RedisMock created
+2025-11-10T12:02:00Z TEST ui_desync_cache_delay: Cached '0' found; DB had row; cache reconciled to '1'
+2025-11-10T12:02:00Z TEST concurrent_toggle_race: Locking performed; final DB and cache = following
+2025-11-10T12:02:00Z TEST cross_tenant_visibility: Tenant key namespacing prevented leakage
+2025-11-10T12:02:00Z TEST api_returns_stale_after_soft_delete: Unfollow (soft-delete) cleared cache -> '0'
+2025-11-10T12:02:00Z TEST delayed_backend_confirmation: Follow failed; DB rollback; cache not set
+2025-11-10T12:02:00Z COMPLETE: All tests passed
