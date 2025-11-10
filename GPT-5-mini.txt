@@ -1,0 +1,334 @@
+820234338: A Flask + SQLAlchemy + Redis system manages a self-referential many-to-many “followers” relationship among users. Each user can follow multiple others, and follower counts are cached in Redis for performance. The front-end, built with React and Axios, performs optimistic UI updates: when a user clicks “Follow”, the button instantly switches to “Following” before the API confirmation arrives.
+After deployment of asynchronous updates and cache integration, users began reporting mismatched follow states. The UI sometimes shows “Following”, but after refreshing or logging in from another device, it reverts to “Follow”. Database inspection reveals that the relationship exists correctly in PostgreSQL, but Redis occasionally returns outdated results. This reflects a desynchronization between UI, cache, and persistent storage, especially under concurrent requests or network latency.
+Redis is shared across tenants, while PostgreSQL is sharded by tenant. Missing tenant-specific cache keys and inconsistent TTLs lead to cross-tenant leakage and cache drift. The issue affects user experience, correctness, and data trustworthiness.
+
+Problem Description:
+The /follow_status/<user_id> API fetches the follow relationship from Redis. If the cached entry is stale or missing, the endpoint returns false without verifying the database. Under concurrent follow/unfollow operations, Redis keys become inconsistent, and optimistic UI rendering worsens the effect. Users see incorrect “Follow” states, even though the database row is correct.
+
+This bug appears in several forms:
+Front-end optimistic update is shown before backend success confirmation.
+Redis caches outdated states because invalidation is asynchronous.
+Cache keys lack tenant prefixes, exposing cross-tenant data.
+Redis TTL expiration causes brief “false” reads between refresh intervals.
+Simultaneous follow/unfollow actions lead to race conditions without distributed locking.
+The result is a visible inconsistency between database truth and user interface state.
+
+Example Case:
+User A clicks “Follow” on User B’s profile.
+UI instantly changes to “Following”.
+Backend inserts (tenant_id=1, follower_id=A, followed_id=B) into the followers table.
+Redis key follow_status:1:A:B still contains false because of async delay.
+On page reload, the frontend queries /follow_status/B and Redis returns false.
+The button reverts to “Follow”, confusing the user.
+
+Observed Result:
+UI shows “Follow” despite a valid database entry.
+
+Expected Result:
+UI and API responses should consistently indicate “Following” once the backend confirms success.
+
+Root Causes:
+Optimistic UI updates commit visual changes before confirming backend success.
+API trusts Redis blindly without verifying DB consistency.
+Cache invalidation and synchronization are missing or delayed.
+Redis TTLs differ per node, causing race conditions under load.
+No distributed locking during concurrent modifications.
+Shared Redis across tenants without namespacing causes data leaks.
+
+Required Fixes:
+
+Backend / API Layer
+Add tenant_id column to followers and propagate it in cache keys.
+Modify /follow_status/<id> to verify database state on cache miss or drift.
+Implement versioned write-through caching and use distributed locks (Redlock).
+Introduce Redis pub/sub invalidation when relationships change.
+Ensure atomic commits using transaction-safe updates.
+
+Front-End Layer
+Remove unconditional optimistic update.
+Display a loading spinner until API response returns 200.
+Roll back UI state on failed API calls.
+Optionally use WebSocket or SSE to synchronize multiple sessions.
+
+Schema Adjustments
+Add composite uniqueness constraint (tenant_id, follower_id, followed_id) to prevent duplicates.
+Exclude soft-deleted relationships (deleted=True) from API queries.
+Add cleanup jobs to remove soft-deleted entries periodically.
+
+Testing Requirements:
+The system must be validated under multiple conditions:
+Normal Flow: Follow/unfollow works, and UI reflects the correct final state.
+Cache Delay: Redis write delay simulated (2 seconds). Verify UI stays pending until updated.
+Concurrent Operations: Multiple rapid toggles must yield deterministic outcomes.
+Redis Failure: Cache outage should gracefully fall back to DB.
+Cross-Tenant Isolation: Tenant 1 and Tenant 2 must never see each other’s cache states.
+
+Metrics:
+UI delay < 200 ms after confirmation.
+Cache consistency rate ≥ 99%.
+Zero cross-tenant leakage.
+
+Example Input Format (test_data.json):
+[
+{
+"case": "cache_delay",
+"tenant_id": 1,
+"follower_id": 101,
+"followed_id": 202,
+"redis_delay_ms": 2000,
+"expected_state": "following"
+},
+{
+"case": "concurrent_toggle",
+"tenant_id": 1,
+"follower_id": 303,
+"followed_id": 404,
+"toggle_count": 5,
+"expected_final_state": "following"
+}
+]
+
+Deliverables:
+api/follow_status.py — fixed logic with cache verification and reconciliation.
+frontend/FollowButton.jsx — revised component with async handling and rollback.
+mocks/redis_mock.py — simulate delays and TTL drift.
+tests/test_follow_uiux.py — end-to-end validation.
+results_uiux.json — contains pass/fail metrics and latency histogram.
+README.md — includes architecture overview and test setup.
+logs/test_run.log — captures backend and cache event traces.
+
+Execution Rules:
+Input file: input.json (faulty logs and schema).
+Output file: output.json (summarized findings, fixes, and test verification).
+Do not overwrite input.json.
+Log all events under logs/test_run.log.
+Record initialization or cache failures explicitly in output.json.
+
+Objective:
+Your AI agent must analyze the faulty input.json, detect desynchronization across UI, cache, and database layers, and refactor the backend and frontend logic to ensure consistent rendering. The output must summarize:
+Root causes and technical explanations.
+Schema and logic changes made.
+Test verification results across all scenarios.
+Execution status: success or failure, with logs.
+
+GitHub Copilot: I'll start by creating a tracked todo list for the multi-step fix, then I'll read input.json to analyze the reported logs/inputs. After that I'll add the backend, frontend, mock, test, and auxiliary files to the workspace. Finally I'll run the tests to validate behavior and produce `output.json` and logs.
+
+I'll first write the todo list (planning step). Then I'll read input.json. Expecting to follow up with file edits and tests. 
+
+Created 6 todos
+
+Now I'll read the input.json file to analyze logs and reproduce scenarios. 
+
+Read [](file:///c%3A/Bug_Bash/25_11_10/v-coralhuang_25_11_10_case3/input.json)
+
+Now I'll mark the "Analyze input.json" todo as completed and start the "Implement backend fix" todo, then add the new files (backend, frontend, mocks, tests, README, logs). Expected outcome: repository gains the new files for running tests. 
+
+Starting (2/6) *Implement backend fix*
+
+I'll now add the new files to implement fixes and tests. These are new files, so I'll create them. I'm going to add a minimal Flask-like API file `api/follow_status.py`, a frontend component `frontend/FollowButton.jsx`, a Redis mock `mocks/redis_mock.py`, tests `tests/test_follow_uiux.py`, `README.md`, and create `logs/test_run.log` and placeholder `results_uiux.json` and `output.json`. This will be a batch of file creations; outcome: repository updated with these artifacts for running tests locally. 
+
+Created [](file:///c%3A/Bug_Bash/25_11_10/v-coralhuang_25_11_10_case3/api/follow_status.py)
+
+I'll add the Redis mock now. 
+
+Created [](file:///c%3A/Bug_Bash/25_11_10/v-coralhuang_25_11_10_case3/mocks/redis_mock.py)
+
+Next I'll add the frontend component file and tests and supporting README, results and logs. I'll create these files now. 
+
+Created [](file:///c%3A/Bug_Bash/25_11_10/v-coralhuang_25_11_10_case3/frontend/FollowButton.jsx)
+
+Now I'll add the tests to simulate the scenarios, plus README, results and logs placeholders. 
+
+Created [](file:///c%3A/Bug_Bash/25_11_10/v-coralhuang_25_11_10_case3/tests/test_follow_uiux.py)
+
+Now create README, output.json placeholder, results_uiux.json placeholder, and logs/test_run.log file. 
+
+Created [](file:///c%3A/Bug_Bash/25_11_10/v-coralhuang_25_11_10_case3/README.md)
+
+Created [](file:///c%3A/Bug_Bash/25_11_10/v-coralhuang_25_11_10_case3/logs/test_run.log)
+
+Created [](file:///c%3A/Bug_Bash/25_11_10/v-coralhuang_25_11_10_case3/results_uiux.json)
+
+Created [](file:///c%3A/Bug_Bash/25_11_10/v-coralhuang_25_11_10_case3/output.json)
+
+I'll mark the backend implement todo as completed and start tests. Next I'll run the tests by executing the test runner script. This will run the python test file and generate results. I'll run the test file in the workspace Python environment.
+I will run the test runner script to execute the simulated tests and collect results; expected outcome: tests run and populate logs and results_uiux.json. 
+
+Ran terminal command: python tests/test_follow_uiux.py
+
+I'll run the test script with PYTHONPATH set so Python can import the api and mocks packages; expected outcome: tests execute and write results_uiux.json and test_run.log. 
+
+Ran terminal command: $env:PYTHONPATH = '.'; python tests/test_follow_uiux.py
+
+I'll fix the missing Optional import in the redis_mock. Then re-run tests. 
+
+Using "Apply Patch"
+
+
+```
+
+```
+Re-running the tests now with PYTHONPATH set. 
+
+Ran terminal command: $env:PYTHONPATH = '.'; python tests/test_follow_uiux.py
+
+Progress update: I ran the test suite. 5 tests passed, 1 failed (soft delete behavior). Next I'll inspect the failing test to see why and patch the service or tests accordingly. I'll open the log and the relevant code. 
+
+Read [](file:///c%3A/Bug_Bash/25_11_10/v-coralhuang_25_11_10_case3/tests/test_follow_uiux.py)
+
+I'll inspect the service follow_status logic to see why soft-delete test failed. 
+
+Read [](file:///c%3A/Bug_Bash/25_11_10/v-coralhuang_25_11_10_case3/api/follow_status.py)
+
+I'll update follow_status.py to verify DB when cache indicates a following (handles soft-deletes and drift), reconcile cache, and return correct state. Then I'll re-run the tests. 
+
+Using "Apply Patch"
+
+
+```
+
+```
+Re-run tests. 
+
+Ran terminal command: $env:PYTHONPATH = '.'; python tests/test_follow_uiux.py
+
+All tests passed. I'll update the todo list marking backend, tests complete, then finalize by writing output.json summarizing the root causes, fixes, files changed, and logs, and ensure results_uiux.json contains the test results. I'll read the generated results_uiux.json and test_run.log to include them. 
+
+Starting (6/6) *Run tests and collect results*
+
+Read [](file:///c%3A/Bug_Bash/25_11_10/v-coralhuang_25_11_10_case3/results_uiux.json)
+
+Read [](file:///c%3A/Bug_Bash/25_11_10/v-coralhuang_25_11_10_case3/logs/test_run.log)
+
+I'll write output.json summarizing root causes, changes made, and test results, and update its contents in the workspace. Then mark the todo as completed. 
+
+Using "Apply Patch"
+
+
+```
+
+```
+
+
+Completed (6/6) *Run tests and collect results*
+
+Summary — what I did next
+- I read and analyzed your input.json reproduction logs and test cases.
+- I implemented a tenant-aware, cache-consistent follow service + Redis mock, updated the frontend follow button behavior, added tests that simulate delays/races, and ran the test suite.
+- I produced test artifacts and a final output.json summarizing root causes, fixes, and verification results.
+
+Progress update (actions & why)
+- I created a todo list, then implemented the backend, frontend, mock, and tests.
+- I ran the tests and iterated once to reconcile cache-vs-DB soft-delete behavior.
+- Final test run: all tests passed in the simulated environment.
+
+Files added/edited (what & why)
+- follow_status.py — follow service with:
+  - tenant-aware Redis keys: follow_status:{tenant}:{follower}:{followed}
+  - read-through reconciliation: on cache miss, read DB and update cache
+  - defensive verification: when cache says following (1) verify DB to avoid stale soft-deleted rows
+  - write-through on follow/unfollow and publishing invalidations
+  - simple distributed lock (Redlock-like via setnx) per relationship to avoid races
+  - in-memory DB simulating tenant_id + soft-delete + composite uniqueness for tests
+- redis_mock.py — Redis mock supporting:
+  - delayed writes (write_delay_ms), TTL expiry, setnx, delete, and pub/sub message capture
+  - used to simulate replica lag / TTL drift and cross-tenant shared keyspace behavior
+- FollowButton.jsx — revised follow button behavior:
+  - wait for API 200 before committing UI change
+  - show a loading state
+  - rollback on failure and display an error
+  - (This is a reference React component; integration into a real app requires wiring axios endpoints.)
+- test_follow_uiux.py — test runner covering:
+  - normal flow
+  - cache delay (simulates 2s Redis delay)
+  - concurrent toggles (concurrent follow/unfollow)
+  - cross-tenant isolation
+  - soft-delete reconciliation
+  - backend failure behavior (idempotence/restore via DB)
+  - Includes a simple test runner that writes logs to test_run.log and results to results_uiux.json.
+- README.md — explains artifacts and how to run tests.
+- test_run.log — test run trace (populated by test runner).
+- results_uiux.json — test results (produced by the runner).
+- output.json — final summary required by the task (written with root causes, changes, and test summary).
+
+Key fixes & rationale (technical)
+- Tenant-aware cache keys:
+  - Problem: Redis keys lacked tenant scope causing cross-tenant leakage.
+  - Fix: Add tenant prefix in cache keys (follow_status:{tenant}:{follower}:{followed}). This prevents different tenants from reading each other’s cached follow state.
+- Cache verification & read-through reconciliation:
+  - Problem: /follow_status endpoint trusted Redis blindly and returned false on cache miss.
+  - Fix: On cache miss, read DB (is_following) and immediately replenish cache (write-through). On cache hit that indicates "following", verify DB (to detect soft-deletes) — if DB disagrees, update cache to the correct value. This avoids transient inconsistency due to TTLs or delayed invalidation.
+- Distributed locking for writes:
+  - Problem: Concurrent follow/unfollow causing race conditions and cache drift.
+  - Fix: Use a per-relationship distributed lock (Redlock-like using setnx with expiry) to serialize follow/unfollow operations to avoid ordering anomalies between DB and cache writes.
+- Publish invalidation:
+  - Problem: Asynchronous invalidation led to stale reads in other nodes/sessions.
+  - Fix: On follow/unfollow we publish an invalidation message to a channel. (In the mock, messages are recorded for tests; in production you would use Redis pub/sub to notify caches.)
+- Frontend: avoid unconditional optimistic UI:
+  - Problem: UI was changed immediately to "Following" before backend success, and didn’t rollback on failure.
+  - Fix: Frontend now displays a loading spinner and updates state only after successful API response (with rollback/yield error on failure). This prevents permanent UI divergence in case of backend failure.
+- Soft-deletes and composite uniqueness:
+  - Recommendation: DB schema should include tenant_id in followers table and a composite unique constraint (tenant_id, follower_id, followed_id). Soft-deleted rows must be excluded from is_following queries and periodic cleanup jobs should purge soft-deleted items to avoid stale duplicates and to simplify invariants.
+
+Tests and verification
+- I ran the tests with Python in the workspace (set PYTHONPATH to '.' so local modules import correctly).
+- Test runner results (file: results_uiux.json) — all tests passed:
+  - test_normal_flow: PASS
+  - test_cache_delay: PASS
+  - test_concurrent_toggle: PASS
+  - test_cross_tenant_isolation: PASS
+  - test_soft_delete_behavior: PASS
+  - test_backend_failure_rollback: PASS
+- Logs are available at test_run.log (also populated by runner).
+
+How to run the tests locally (PowerShell)
+- Run in the repository root (your workspace path):
+  - $env:PYTHONPATH = '.'; python test_follow_uiux.py
+- The runner will produce:
+  - results_uiux.json with the test results
+  - test_run.log with per-test PASS/FAIL traces
+  - output.json with a summary (already written)
+
+Notes about simulation vs production
+- The code is a simplified simulation to demonstrate the fixes in isolation:
+  - I used an in-memory DB (InMemoryDB) to avoid external Postgres dependency and to provide deterministic behavior for tests.
+  - The Redis mock simulates delays and pub/sub. In production, use real Redis and a robust Redlock implementation (or another distributed locking mechanism like etcd/consul) and handle lock failures gracefully.
+  - The FollowButton.jsx is a reference component showing proper async handling; integrate into your React app and wire endpoints as needed.
+- Recommended production changes:
+  - Add `tenant_id` column and composite unique constraint to the followers table: (tenant_id, follower_id, followed_id).
+  - Ensure follow/unfollow DB updates and cache writes happen atomically or reconcile cache synchronously where possible.
+  - Use robust distributed locking if writes must be serialized.
+  - Use pub/sub or a message bus to push invalidations across app servers.
+  - Consider using short TTLs or versioned keys (e.g., a per-relationship version) or using monotonic counters to reduce race windows.
+  - Consider optimistic UI but only after backend confirms success (or use immediate optimistic UI but plan for robust rollback and server-to-client synchronization like WebSocket/SSE).
+
+Workspace files changed (quick list)
+- follow_status.py — implement fixes and test runner helper
+- redis_mock.py — simulated Redis for tests
+- FollowButton.jsx — updated button behavior (reference)
+- test_follow_uiux.py — test suite + runner
+- README.md — instructions
+- test_run.log — test logs
+- results_uiux.json — test results
+- output.json — summary
+
+Attached outputs (where to look)
+- results_uiux.json — per-test pass/fail
+- test_run.log — test run trace
+- output.json — summarized findings, fixes, and verification
+
+Execution status
+- Success: All simulated tests passed. The output.json and results_uiux.json files have been written and test_run.log contains the run trace.
+
+If you'd like next
+- I can convert this simulated code into real Flask endpoints (routes for POST /api/follow, /api/unfollow, GET /api/follow_status/<id>) that integrate with your actual SQLAlchemy models and Redis instance. That would include:
+  - migrations for adding tenant_id and unique constraint,
+  - wiring real Redis and Redlock libraries,
+  - integration tests against a real Postgres + Redis (docker-compose).
+- Or I can open a PR with these changes, or adapt the FollowButton JSX into your front-end codebase.
+
+Would you like me to:
+- implement real Flask endpoints tied to your existing SQLAlchemy models and create a migration script? or
+- generate a production-ready design doc with exact SQL migration SQL and Redis key conventions?
+
+Made changes.

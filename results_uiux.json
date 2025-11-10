@@ -1,0 +1,28 @@
+{
+  "results": [
+    {
+      "test": "test_normal_flow",
+      "status": "PASS"
+    },
+    {
+      "test": "test_cache_delay",
+      "status": "PASS"
+    },
+    {
+      "test": "test_concurrent_toggle",
+      "status": "PASS"
+    },
+    {
+      "test": "test_cross_tenant_isolation",
+      "status": "PASS"
+    },
+    {
+      "test": "test_soft_delete_behavior",
+      "status": "PASS"
+    },
+    {
+      "test": "test_backend_failure_rollback",
+      "status": "PASS"
+    }
+  ]
+}
