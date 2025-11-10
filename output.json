@@ -1,0 +1,23 @@
+{
+  "execution_status": "success",
+  "root_causes": [
+    "Optimistic UI flips state without waiting for HTTP 200",
+    "API trusts Redis cached value and does not re-check DB when cached=false",
+    "Redis keys lacked tenant scoping, causing cross-tenant leaks",
+    "Cache invalidation was asynchronous and lacked distributed locking"
+  ],
+  "fixes_applied": [
+    "Added tenant_id column to model and Redis keys now include tenant prefix",
+    "FollowService.get_following reconciles Redis with DB on cache miss and when cached=false",
+    "FollowService uses distributed lock abstraction for atomic follow/unfollow writes",
+    "FollowService publishes on Redis pub/sub when relationships change",
+    "Frontend FollowButton removed unconditional optimistic update and shows loading/rollback on failure",
+    "Added composite unique constraint to followers table and excluded soft-deleted rows from active queries"
+  ],
+  "tests_summary": {
+    "total": 5,
+    "passed": 5,
+    "failed": 0
+  },
+  "logs": "logs/test_run.log"
+}
