@@ -1,0 +1,112 @@
+A Flask + SQLAlchemy + Redis system manages a self-referential many-to-many “followers” relationship among users. Each user can follow multiple others, and follower counts are cached in Redis for performance. The front-end, built with React and Axios, performs optimistic UI updates: when a user clicks “Follow”, the button instantly switches to “Following” before the API confirmation arrives.
+After deployment of asynchronous updates and cache integration, users began reporting mismatched follow states. The UI sometimes shows “Following”, but after refreshing or logging in from another device, it reverts to “Follow”. Database inspection reveals that the relationship exists correctly in PostgreSQL, but Redis occasionally returns outdated results. This reflects a desynchronization between UI, cache, and persistent storage, especially under concurrent requests or network latency.
+Redis is shared across tenants, while PostgreSQL is sharded by tenant. Missing tenant-specific cache keys and inconsistent TTLs lead to cross-tenant leakage and cache drift. The issue affects user experience, correctness, and data trustworthiness.
+
+Problem Description:
+The /follow_status/<user_id> API fetches the follow relationship from Redis. If the cached entry is stale or missing, the endpoint returns false without verifying the database. Under concurrent follow/unfollow operations, Redis keys become inconsistent, and optimistic UI rendering worsens the effect. Users see incorrect “Follow” states, even though the database row is correct.
+
+This bug appears in several forms:
+Front-end optimistic update is shown before backend success confirmation.
+Redis caches outdated states because invalidation is asynchronous.
+Cache keys lack tenant prefixes, exposing cross-tenant data.
+Redis TTL expiration causes brief “false” reads between refresh intervals.
+Simultaneous follow/unfollow actions lead to race conditions without distributed locking.
+The result is a visible inconsistency between database truth and user interface state.
+
+Example Case:
+User A clicks “Follow” on User B’s profile.
+UI instantly changes to “Following”.
+Backend inserts (tenant_id=1, follower_id=A, followed_id=B) into the followers table.
+Redis key follow_status:1:A:B still contains false because of async delay.
+On page reload, the frontend queries /follow_status/B and Redis returns false.
+The button reverts to “Follow”, confusing the user.
+
+Observed Result:
+UI shows “Follow” despite a valid database entry.
+
+Expected Result:
+UI and API responses should consistently indicate “Following” once the backend confirms success.
+
+Root Causes:
+Optimistic UI updates commit visual changes before confirming backend success.
+API trusts Redis blindly without verifying DB consistency.
+Cache invalidation and synchronization are missing or delayed.
+Redis TTLs differ per node, causing race conditions under load.
+No distributed locking during concurrent modifications.
+Shared Redis across tenants without namespacing causes data leaks.
+
+Required Fixes:
+
+Backend / API Layer
+Add tenant_id column to followers and propagate it in cache keys.
+Modify /follow_status/<id> to verify database state on cache miss or drift.
+Implement versioned write-through caching and use distributed locks (Redlock).
+Introduce Redis pub/sub invalidation when relationships change.
+Ensure atomic commits using transaction-safe updates.
+
+Front-End Layer
+Remove unconditional optimistic update.
+Display a loading spinner until API response returns 200.
+Roll back UI state on failed API calls.
+Optionally use WebSocket or SSE to synchronize multiple sessions.
+
+Schema Adjustments
+Add composite uniqueness constraint (tenant_id, follower_id, followed_id) to prevent duplicates.
+Exclude soft-deleted relationships (deleted=True) from API queries.
+Add cleanup jobs to remove soft-deleted entries periodically.
+
+Testing Requirements:
+The system must be validated under multiple conditions:
+Normal Flow: Follow/unfollow works, and UI reflects the correct final state.
+Cache Delay: Redis write delay simulated (2 seconds). Verify UI stays pending until updated.
+Concurrent Operations: Multiple rapid toggles must yield deterministic outcomes.
+Redis Failure: Cache outage should gracefully fall back to DB.
+Cross-Tenant Isolation: Tenant 1 and Tenant 2 must never see each other’s cache states.
+
+Metrics:
+UI delay < 200 ms after confirmation.
+Cache consistency rate ≥ 99%.
+Zero cross-tenant leakage.
+
+Example Input Format (test_data.json):
+[
+{
+"case": "cache_delay",
+"tenant_id": 1,
+"follower_id": 101,
+"followed_id": 202,
+"redis_delay_ms": 2000,
+"expected_state": "following"
+},
+{
+"case": "concurrent_toggle",
+"tenant_id": 1,
+"follower_id": 303,
+"followed_id": 404,
+"toggle_count": 5,
+"expected_final_state": "following"
+}
+]
+
+Deliverables:
+api/follow_status.py — fixed logic with cache verification and reconciliation.
+frontend/FollowButton.jsx — revised component with async handling and rollback.
+mocks/redis_mock.py — simulate delays and TTL drift.
+tests/test_follow_uiux.py — end-to-end validation.
+results_uiux.json — contains pass/fail metrics and latency histogram.
+README.md — includes architecture overview and test setup.
+logs/test_run.log — captures backend and cache event traces.
+
+Execution Rules:
+Input file: input.json (faulty logs and schema).
+Output file: output.json (summarized findings, fixes, and test verification).
+Do not overwrite input.json.
+Log all events under logs/test_run.log.
+Record initialization or cache failures explicitly in output.json.
+
+Objective:
+Your AI agent must analyze the faulty input.json, detect desynchronization across UI, cache, and database layers, and refactor the backend and frontend logic to ensure consistent rendering. The output must summarize:
+Root causes and technical explanations.
+Schema and logic changes made.
+Test verification results across all scenarios.
+Execution status: success or failure, with logs.
